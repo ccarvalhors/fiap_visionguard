@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>Vision Guard</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <header>
+        <h1>Vision Guard</h1>
+    </header>
+
+    <main>
+        <!-- Modal de sessão -->
+        <div id="sessionModal" class="session-modal">
+            <div class="session-modal-content">
+            <h2>Informe seu e-mail</h2>
+            <input type="email" id="userEmail" placeholder="Digite seu e-mail" required />
+            <button onclick="saveEmail()">Continuar</button>
+            </div>
+        </div>
+
+        <!-- Controles -->
+        <section id="controls">
+            <button id="toggleCamera">Ligar Câmera</button>
+            <form id="uploadForm">
+                <input type="file" id="videoUpload" accept="video/*">
+                <button type="submit">Enviar Vídeo</button>
+            </form>
+        </section>
+
+        <!-- Câmera -->
+        <section id="videoSection">
+            <video id="video" autoplay playsinline></video>
+            <canvas id="canvas" style="display:none;"></canvas>
+        </section>
+
+        <!-- Lista de alarmes -->
+        <section id="alarmsContainer">
+            <h2>Alarmes Detectados</h2>
+            <div id="alarmsList"></div>
+        </section>
+
+        <!-- Modal para exibir alarme ampliado -->
+        <div id="alarmModal" class="alarm-modal">
+            <span class="close" onclick="closeModal()">&times;</span>
+            <img class="alarm-modal-content" id="modalImage">
+            <div id="alarmeModalCaption"></div>
+        </div>
+    </main>
+
+    <!-- Scripts -->
+    <script src="https://cdn.socket.io/4.3.2/socket.io.min.js"></script>
+    <script src="/static/script.js"></script>
+</body>
+</html>
