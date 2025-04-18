@@ -24,32 +24,6 @@ function saveEmail() {
     }
 }
 
-// Ligar ou desligar câmera
-toggleButton.addEventListener("click", async () => {
-    if (!streaming) {
-        try {
-            stream = await navigator.mediaDevices.getUserMedia({ video: true });
-            video.srcObject = stream;
-            streaming = true;
-            toggleButton.textContent = "Desligar Câmera";
-
-            sendFrameInterval = setInterval(() => {
-                captureFrame();
-            }, 300); // Ajuste o intervalo conforme necessário
-        } catch (err) {
-            console.error("Erro ao acessar a câmera:", err);
-        }
-    } else {
-        if (stream) {
-            stream.getTracks().forEach(track => track.stop());
-        }
-        video.srcObject = null;
-        clearInterval(sendFrameInterval);
-        streaming = false;
-        toggleButton.textContent = "Ligar Câmera";
-    }
-});
-
 // Captura o frame e envia ao servidor
 function captureFrame() {
     if (!streaming) return;
@@ -64,6 +38,35 @@ function captureFrame() {
         email: userEmail
     });
 }
+
+// Ligar ou desligar câmera
+toggleButton.addEventListener("click", async () => {
+    if (!streaming) {
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            video.srcObject = stream;
+            streaming = true;
+            toggleButton.textContent = "Desligar Câmera";
+
+            sendFrameInterval = setInterval(() => {
+                captureFrame();
+            }, 1000); // Ajuste o intervalo conforme necessário
+        } catch (err) {
+            console.error("Erro ao acessar a câmera:", err);
+        }
+    } else {
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+        }
+        video.srcObject = null;
+        clearInterval(sendFrameInterval);
+        streaming = false;
+        toggleButton.textContent = "Ligar Câmera";
+
+        // Envia evento para desarmar o alarme
+        socket.emit("disarm_alarm", {});
+    }
+});
 
 // Recebe evento de alarme
 socket.on("alarm", (data) => {
