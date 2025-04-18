@@ -2,23 +2,25 @@ import base64
 import cv2
 import numpy as np
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from flask import Flask, jsonify, render_template, request
 from flask_socketio import SocketIO, emit
 from werkzeug.utils import secure_filename
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.utils import ImageReader
-from reportlab.lib.units import inch
-import uuid
-from io import BytesIO
-from PIL import Image
-import requests
 from dotenv import load_dotenv
 import threading
 from tqdm import tqdm
+import face_recognition
+from ultralytics import YOLO
 
+from email_sender import send_email_alarm_live, send_email_with_pdf
+from helpers import format_time
+from report import generate_pdf_report
+
+# Carrega configurações do arquivo .env e disponibiliza como variáveis de ambiente.
 load_dotenv()
+
+# Carregar o modelo YOLO treinado
+knife_model = YOLO('models/knife/best.pt')
 
 # Flask setup
 app = Flask(__name__)
@@ -29,160 +31,133 @@ socketio = SocketIO(app)
 os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 os.makedirs(app.config["REPORT_FOLDER"], exist_ok=True)
 
-# Estado de detecção
-last_detected_state = False
+# Estado do alarme
+alarm_triggered = False
 
-def send_email_alarm_live(email_to, image_b64, timestamp, message):
-    url = "https://api.brevo.com/v3/smtp/email"
-    headers = {
-        "accept": "application/json",
-        "api-key": os.getenv("BREVO_API_KEY"),
-        "content-type": "application/json"
-    }
+def emit_alarm(frame, email_to, message):
+    """
+    Emite um alarme quando um objeto cortante é detectado, enviando uma notificação por e-mail e transmitindo a imagem.
 
-    html_content = f"""
-    <h3>🚨 Alarme detectado</h3>
-    <p><strong>{message}</strong> em {timestamp}</p>
+    Parâmetros:
+    frame (ndarray): Imagem do frame capturado da câmera ou do vídeo onde o alarme foi detectado.
+    email_to (str): Endereço de e-mail para o qual o alarme será enviado.
+    message (str): Mensagem que descreve o tipo de alarme gerado (ex. "Objeto Cortante Detectado").
+
+    Retorna:
+    None
     """
 
-    data = {
-        "sender": {"name": "Vision Guard", "email": os.getenv("EMAIL_FROM")},
-        "to": [{"email": email_to}],
-        "subject": "Alarme ao vivo - Vision Guard",
-        "htmlContent": html_content,
-        "attachment": [{
-            "name": "alarme.jpg",
-            "content": image_b64
-        }]
-    }
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _, jpeg_image = cv2.imencode(".jpg", frame)
+    base64_image = base64.b64encode(jpeg_image).decode("utf-8")
 
-    response = requests.post(url, headers=headers, json=data)
-    print("[INFO] Alarme ao vivo enviado por e-mail:", response.status_code, response.text)
+    emit("alarm", {
+        "image": f"data:image/jpeg;base64,{base64_image}",
+        "message": message,
+        "timestamp": timestamp
+    })
+    send_email_alarm_live(email_to, base64_image, timestamp, message)
 
-def send_email_with_pdf(email_to, report_path, original_filename):
-    url = "https://api.brevo.com/v3/smtp/email"
-    headers = {
-        "accept": "application/json",
-        "api-key": os.getenv("BREVO_API_KEY"),
-        "content-type": "application/json"
-    }
+def detect_faces(frame): 
+    """
+    Detecta rostos em um frame de imagem e desenha retângulos ao redor dos rostos detectados.
 
-    with open(report_path, "rb") as f:
-        encoded_pdf = base64.b64encode(f.read()).decode()
+    Parâmetros:
+    frame (ndarray): Imagem ou vídeo onde a detecção facial será realizada.
 
-    data = {
-        "sender": {"name": "Vision Guard", "email": os.getenv("EMAIL_FROM")},
-        "to": [{"email": email_to}],
-        "subject": f"📄 Relatório Vision Guard - {original_filename}",
-        "htmlContent": f"<p>Seu relatório chegou! Veja em anexo.</p>",
-        "attachment": [{
-            "name": f"relatorio_{original_filename}.pdf",
-            "content": encoded_pdf
-        }]
-    }
+    Retorna:
+    tuple: 
+        - frame (ndarray): O frame original com os retângulos desenhados ao redor dos rostos detectados.
+        - bool: True se algum rosto foi detectado, caso contrário, False.
+    """
 
-    response = requests.post(url, headers=headers, json=data)
-    print("[INFO] Relatório enviado por e-mail:", response.status_code, response.text)
-
-def detect_faces(frame):
-    import face_recognition
     face_locations = face_recognition.face_locations(frame)
     for (top, right, bottom, left) in face_locations:
-        cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+        cv2.rectangle(frame, (left, top), (right, bottom), (0, 0, 255), 2)
+
     return frame, len(face_locations) > 0
 
-def format_time(ms):
-    seconds = ms / 1000.0
-    return datetime.fromtimestamp(seconds, timezone.utc).strftime('%H:%M:%S')
+def detect_knives(frame):
+    """
+    Detecta objetos cortantes (facas) em um frame de imagem e desenha retângulos ao redor dos objetos detectados.
 
-def generate_pdf_report(alarms, output_folder, video_filename):
-    # Gera nome do arquivo PDF com UUID
-    unique_filename = f"relatorio_{uuid.uuid4().hex}.pdf"
-    report_path = os.path.join(output_folder, unique_filename)
+    Parâmetros:
+    frame (ndarray): Imagem ou vídeo onde a detecção de facas será realizada.
 
-    # Data atual formatada
-    current_date = datetime.now().strftime("%d/%m/%Y")
+    Retorna:
+    tuple:
+        - frame (ndarray): O frame original com os retângulos desenhados ao redor das facas detectadas.
+        - bool: True se uma faca foi detectada, caso contrário, False.
+    """
 
-    # Cria o canvas do PDF
-    c = canvas.Canvas(report_path, pagesize=letter)
-    width, height = letter
+    results = knife_model.predict(frame, conf=0.4, verbose=False)
+    boxes = results[0].boxes
+    
+    for box in boxes:
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+        # Desenhar retângulo
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)        
 
-    # Título do relatório (somente na primeira página)
-    c.setFont("Helvetica-Bold", 16)
-    title = f"Relatório de Alarmes - {current_date} - {video_filename}"
-    c.drawCentredString(width / 2, height - 50, title)
-    c.setFont("Helvetica", 12)
-    c.drawString(50, height - 70, f"Total de alarmes detectados: {len(alarms)}")
-
-    y_position = height - 120
-
-    for alarm in alarms:
-        # Converter imagem para RGB e salvar em buffer
-        img_rgb = cv2.cvtColor(alarm["image"], cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(img_rgb)
-        img_buffer = BytesIO()
-        pil_img.save(img_buffer, format="JPEG")
-        img_buffer.seek(0)
-
-        # Inserir imagem no PDF
-        image_reader = ImageReader(img_buffer)
-        img_width = 3.5 * inch
-        img_height = 2.5 * inch
-        img_x = 50
-
-        if y_position < 100:
-            c.showPage()
-            y_position = height - 80
-
-        c.drawImage(image_reader, img_x, y_position - img_height, width=img_width, height=img_height, preserveAspectRatio=True)
-
-        # Dados do alarme
-        c.setFont("Helvetica", 11)
-        c.drawString(img_x + img_width + 20, y_position - 30, f"⏰ Horário no vídeo: {alarm['time']}")
-        c.drawString(img_x + img_width + 20, y_position - 50, f"📍 Mensagem: {alarm['message']}")
-
-        y_position -= img_height + 60
-
-    c.save()
-    return unique_filename
+    return frame, len(boxes) > 0
 
 def process_frame(image_data, email_to):
-    global last_detected_state
+    global alarm_triggered
 
     try:
-        print("[INFO] Processando frame ao vivo...")
+        #print("[INFO] Processando frame ao vivo...")
 
+        # Decodificar a imagem recebida
         frame_bytes = base64.b64decode(image_data)
         np_arr = np.frombuffer(frame_bytes, np.uint8)
-        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)        
 
-        _, detected = detect_faces(frame)
-        if detected:
-            print("[INFO] Face detectada...")        
+        # Detectar objetos cortantes
+        _, knife_detected = detect_knives(frame)
 
-        # Verifica transição de estado
-        if detected and not last_detected_state:            
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            _, jpeg_image = cv2.imencode(".jpg", frame)
-            base64_image = base64.b64encode(jpeg_image).decode("utf-8")
-            print("[INFO] Novo alarme...")
-            emit("alarm", {
-                "image": f"data:image/jpeg;base64,{base64_image}",
-                "message": "Face detectada",
-                "timestamp": timestamp
-            })
-            send_email_alarm_live(email_to, base64_image, timestamp, "Face detectada")
+        # Verifica se deve alarmar
+        if knife_detected and not alarm_triggered:
+            # Detectar faces
+            _, face_detected = detect_faces(frame)
 
-        last_detected_state = detected        
+            if knife_detected and face_detected:
+                print("[ALARM] Pessoa com objeto cortante detectada.")
+                emit_alarm(frame, email_to, "Pessoa com objeto cortante detectada")                
+
+            else:
+                print("[ALARM] Objeto cortante detectado.")
+                emit_alarm(frame, email_to, "Objeto cortante detectado")
+
+            alarm_triggered = True
+
+        elif not knife_detected:
+            alarm_triggered = False
 
     except Exception as e:
         print("[ERRO] Ao processar frame:", e)
 
 def process_video(email_to, filepath, filename):
+    """
+    Processa um frame de imagem recebido, detecta objetos cortantes e faces, e gera alarmes via e-mail.
+
+    Parâmetros:
+    image_data (str): Dados de imagem codificados em base64 recebidos do cliente.
+    email_to (str): E-mail para o qual o alarme será enviado.
+
+    Retorna:
+    None
+
+    A função processa o frame de imagem para detectar objetos cortantes e faces. Se um objeto cortante for
+    detectado e uma face estiver presente na cena, um alarme de "Pessoa com objeto cortante detectada" é gerado.
+    Caso contrário, um alarme de "Objeto cortante detectado" é gerado. O alarme é enviado por e-mail com a imagem.
+    A função só gera um novo alarme quando um novo evento de detecção é detectado (alarm_triggered é verificado).
+    """
+
     cap = cv2.VideoCapture(filepath)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     alarms = []
-    last_detected = False
+    
+    # Flag para não repetir alarmes
+    alarm_triggered = False    
 
     print(f"[INFO] Processando vídeo: {filename}")
     with tqdm(total=total_frames, desc="Processando vídeo") as pbar:
@@ -190,15 +165,37 @@ def process_video(email_to, filepath, filename):
             ret, frame = cap.read()
             if not ret:
                 break
-            processed_frame, detected = detect_faces(frame)
+
+            processed_frame = frame.copy()
             timestamp_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
-            if detected and not last_detected:
-                alarms.append({
-                    "time": format_time(timestamp_ms),
-                    "message": "Face detectada no vídeo",
-                    "image": processed_frame.copy()
-                })
-            last_detected = detected
+            time_str = format_time(timestamp_ms)
+
+            # Detectar objetos cortantes
+            processed_frame, knife_detected = detect_knives(processed_frame)
+
+             # Verifica se deve alarmar
+            if knife_detected and not alarm_triggered:
+                # Detectar faces
+                processed_frame, face_detected = detect_faces(processed_frame)
+
+                if knife_detected and face_detected:                
+                    alarms.append({
+                        "time": time_str,
+                        "message": "Pessoa com objeto cortante detectada",
+                        "image": processed_frame.copy()
+                    })
+                else:
+                    alarms.append({
+                        "time": time_str,
+                        "message": "Objeto cortante detectado",
+                        "image": processed_frame.copy()
+                    })
+                
+                alarm_triggered = True
+
+            elif not knife_detected:
+                alarm_triggered = False            
+            
             pbar.update(1)
 
     cap.release()
@@ -207,11 +204,31 @@ def process_video(email_to, filepath, filename):
     send_email_with_pdf(email_to, os.path.join(app.config["REPORT_FOLDER"], report_name), os.path.basename(filepath))
 
 def start_video_processing(email_to, filepath, filename):
+    """
+    Inicia o processamento de um vídeo em um thread separado.
+
+    Parâmetros:
+    email_to (str): O endereço de e-mail para o qual o relatório será enviado ao final do processamento do vídeo.
+    filepath (str): O caminho completo para o arquivo de vídeo a ser processado.
+    filename (str): O nome do arquivo de vídeo.
+
+    Retorna:
+    None
+
+    A função cria e inicia uma nova thread que chama a função `process_video` para processar o vídeo especificado.
+    O processamento ocorre em segundo plano, permitindo que a aplicação continue responsiva enquanto o vídeo
+    é processado. Ao final, um relatório é gerado e enviado por e-mail para o endereço fornecido.
+    """
+
     thread = threading.Thread(
         target=process_video,
         args=(email_to, filepath, filename)
     )
     thread.start()
+
+#--------------------------------------------------------------------------
+# Rotas
+#--------------------------------------------------------------------------
 
 @app.route("/")
 def index():
@@ -231,9 +248,17 @@ def upload():
             "message": "Vídeo enviado com sucesso! Você receberá o relatório por e-mail assim que estiver pronto."
         })
 
+#--------------------------------------------------------------------------
+# Eventos
+#--------------------------------------------------------------------------
 @socketio.on("frame")
 def frame(data):    
     process_frame(data["image"].split(",")[1], data["email"])
+
+@socketio.on("disarm_alarm")
+def disarm_alarm(data):
+    global alarm_triggered
+    alarm_triggered = False
 
 if __name__ == "__main__":
     socketio.run(app, debug=True)
