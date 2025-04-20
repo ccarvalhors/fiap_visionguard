@@ -8,3 +8,4 @@ uuid
 requests
 python-dotenv
 ultralytics
+face_recognition
