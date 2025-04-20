@@ -71,7 +71,7 @@ visionguard/
 
 ```bash
 git clone https://github.com/ccarvalhors/fiap_visionguard.git
-cd visionguard
+cd fiap_visionguard
 ```
 
 ### 2. Instale as dependências
