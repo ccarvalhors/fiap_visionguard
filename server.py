@@ -9,7 +9,7 @@ from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 import threading
 from tqdm import tqdm
-import face_recognition
+from deepface import DeepFace
 from ultralytics import YOLO
 
 from email_sender import send_email_alarm_live, send_email_with_pdf
@@ -34,6 +34,28 @@ os.makedirs(app.config["REPORT_FOLDER"], exist_ok=True)
 # Estado do alarme
 alarm_triggered = False
 
+def detect_faces(frame):
+    try:
+        # DeepFace retorna uma lista com as análises das faces encontradas
+        detections = DeepFace.extract_faces(
+            img_path=frame,
+            detector_backend='opencv',  # você pode testar com 'retinaface', 'mediapipe', etc.
+            enforce_detection=False,
+            align=False
+        )
+
+        # Desenhar as caixas no frame
+        for detection in detections:
+            region = detection['facial_area']
+            x, y, w, h = region['x'], region['y'], region['w'], region['h']
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
+
+        return frame, len(detections) > 0
+
+    except Exception as e:
+        print("[ERRO] Erro ao detectar faces com DeepFace:", e)
+        return frame, False
+
 def emit_alarm(frame, email_to, message):
     """
     Emite um alarme quando um objeto cortante é detectado, enviando uma notificação por e-mail e transmitindo a imagem.
@@ -57,25 +79,6 @@ def emit_alarm(frame, email_to, message):
         "timestamp": timestamp
     })
     send_email_alarm_live(email_to, base64_image, timestamp, message)
-
-def detect_faces(frame): 
-    """
-    Detecta rostos em um frame de imagem e desenha retângulos ao redor dos rostos detectados.
-
-    Parâmetros:
-    frame (ndarray): Imagem ou vídeo onde a detecção facial será realizada.
-
-    Retorna:
-    tuple: 
-        - frame (ndarray): O frame original com os retângulos desenhados ao redor dos rostos detectados.
-        - bool: True se algum rosto foi detectado, caso contrário, False.
-    """
-
-    face_locations = face_recognition.face_locations(frame)
-    for (top, right, bottom, left) in face_locations:
-        cv2.rectangle(frame, (left, top), (right, bottom), (0, 0, 255), 2)
-
-    return frame, len(face_locations) > 0
 
 def detect_knives(frame):
     """
