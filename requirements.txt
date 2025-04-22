@@ -2,10 +2,11 @@ flask
 flask-socketio
 eventlet
 opencv-python
-numpy
+numpy<2.0
 reportlab
 uuid
 requests
 python-dotenv
 ultralytics
-face_recognition
+deepface
+tf-keras
